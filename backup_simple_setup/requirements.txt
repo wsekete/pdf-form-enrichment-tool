@@ -1,27 +1,13 @@
-# Core dependencies
 pypdf>=4.0.0
 click>=8.0.0
 pydantic>=2.0.0
 pyyaml>=6.0.0
 python-dotenv>=1.0.0
-
-# AI and API integration
 openai>=1.30.0
 requests>=2.31.0
 aiohttp>=3.9.0
-
-# MCP Server
-mcp>=1.0.0
-asyncio-mqtt>=0.16.0
-
-# Data processing
 pandas>=2.0.0
 numpy>=1.24.0
 python-dateutil>=2.8.0
-
-# PDF validation (optional)
-adobe-pdfservices-sdk>=4.0.0
-
-# Logging and monitoring
 structlog>=23.0.0
 rich>=13.0.0

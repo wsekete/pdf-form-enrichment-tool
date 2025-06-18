@@ -1,0 +1,94 @@
+{
+  "version": "1.0.0",
+  "description": "BEM naming patterns and training examples for PDF form field enrichment",
+  "last_updated": "2024-01-01",
+  
+  "block_patterns": {
+    "owner-information": {
+      "keywords": ["owner", "applicant", "policyholder", "insured"],
+      "context_patterns": ["owner information", "applicant details", "policy owner"],
+      "confidence_weight": 0.9
+    },
+    "beneficiary-information": {
+      "keywords": ["beneficiary", "recipient", "heir"],
+      "context_patterns": ["beneficiary information", "primary beneficiary", "contingent beneficiary"],
+      "confidence_weight": 0.9
+    },
+    "payment": {
+      "keywords": ["payment", "premium", "billing", "financial"],
+      "context_patterns": ["payment information", "billing details", "premium payment"],
+      "confidence_weight": 0.8
+    },
+    "signatures": {
+      "keywords": ["signature", "sign", "authorization", "consent"],
+      "context_patterns": ["signature", "authorization", "consent", "acknowledgment"],
+      "confidence_weight": 1.0
+    }
+  },
+  
+      "element_patterns": {
+    "name": {
+      "keywords": ["name", "full name"],
+      "modifiers": ["first", "last", "middle", "full"],
+      "confidence_weight": 0.9
+    },
+    "address": {
+      "keywords": ["address", "street", "city", "state", "zip"],
+      "modifiers": ["street", "city", "state", "zip", "country"],
+      "confidence_weight": 0.8
+    },
+    "phone": {
+      "keywords": ["phone", "telephone", "mobile", "cell"],
+      "modifiers": ["home", "work", "mobile", "primary"],
+      "confidence_weight": 0.9
+    },
+    "email": {
+      "keywords": ["email", "e-mail", "electronic mail"],
+      "modifiers": ["primary", "secondary", "work", "personal"],
+      "confidence_weight": 0.9
+    },
+    "ssn": {
+      "keywords": ["ssn", "social security", "tax id", "tin"],
+      "modifiers": ["owner", "beneficiary", "joint"],
+      "confidence_weight": 1.0
+    },
+    "amount": {
+      "keywords": ["amount", "value", "dollar", "percentage"],
+      "modifiers": ["gross", "net", "minimum", "maximum", "current"],
+      "confidence_weight": 0.7
+    }
+  },
+  
+  "training_examples": [
+    {
+      "context": {
+        "nearby_text": ["Owner Information", "First Name"],
+        "section_header": "Owner Information",
+        "field_type": "text"
+      },
+      "bem_name": "owner-information_name__first",
+      "confidence": 0.95,
+      "notes": "Clear section and field label"
+    },
+    {
+      "context": {
+        "nearby_text": ["Primary Beneficiary", "Name"],
+        "section_header": "Beneficiary Information",
+        "field_type": "text"
+      },
+      "bem_name": "beneficiary-information_name__primary",
+      "confidence": 0.90,
+      "notes": "Primary beneficiary designation"
+    }
+  ],
+  
+  "validation_rules": {
+    "bem_format": {
+      "pattern": "^[a-z][a-z0-9-]*(_[a-z][a-z0-9-]*)(__[a-z][a-z0-9-]*)?$",
+      "description": "Valid BEM naming pattern"
+    },
+    "reserved_words": ["group", "custom", "temp", "test"],
+    "max_length": 100,
+    "min_length": 3
+  }
+}

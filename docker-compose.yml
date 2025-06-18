@@ -1,0 +1,27 @@
+version: '3.8'
+
+services:
+  pdf-form-editor:
+    build:
+      context: .
+      target: production
+    container_name: pdf-form-editor-dev
+    volumes:
+      - .:/app
+      - pdf_temp:/app/temp
+      - pdf_logs:/app/logs
+      - pdf_output:/app/output
+    environment:
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - ADOBE_API_KEY=${ADOBE_API_KEY}
+      - LOG_LEVEL=DEBUG
+      - DEVELOPMENT_MODE=true
+    ports:
+      - "8000:8000"
+    stdin_open: true
+    tty: true
+
+volumes:
+  pdf_temp:
+  pdf_logs:
+  pdf_output:

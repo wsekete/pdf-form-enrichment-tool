@@ -1,0 +1,41 @@
+# PDF Form Enrichment Tool - Default Configuration
+
+general:
+  app_name: "pdf-form-enrichment-tool"
+  version: "1.0.0"
+  log_level: "INFO"
+  debug: false
+  backup_enabled: true
+  max_concurrent_processes: 4
+
+processing:
+  timeout_seconds: 300
+  confidence_threshold: 0.8
+  auto_approve_high_confidence: false
+  validation_level: "strict"
+  max_file_size_mb: 50
+
+ai:
+  provider: "openai"
+  model: "gpt-4"
+  max_tokens: 150
+  temperature: 0.1
+  cache_enabled: true
+  fallback_enabled: true
+
+naming:
+  bem_strict_mode: true
+  allow_custom_patterns: false
+  max_name_length: 100
+  enforce_lowercase: true
+
+training:
+  training_data_path: "./training_data/bem_patterns.json"
+  auto_update_patterns: true
+  pattern_weight: 0.7
+
+mcp_server:
+  host: "localhost"
+  port: 8000
+  max_sessions: 10
+  session_timeout_minutes: 60

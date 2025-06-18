@@ -8,6 +8,7 @@ This directory contains comprehensive documentation for the PDF Form Enrichment 
 - **[form_editor_task_list.md](form_editor_task_list.md)** - Complete development task list with detailed instructions
 - **[form_field_editor_prd.md](form_field_editor_prd.md)** - Product Requirements Document for the core engine
 - **[mcp_server_prd.md](mcp_server_prd.md)** - Product Requirements Document for Claude Desktop integration
+- **[mcp_server_task_list.md](mcp_server_task_list.md)** - Complete development task list for Claude Desktop integration
 
 ### Reference Documentation  
 - **[api_reference.md](api_reference.md)** - Complete API documentation with examples

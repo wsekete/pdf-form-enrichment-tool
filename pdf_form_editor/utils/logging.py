@@ -26,3 +26,8 @@ def setup_logging(level: str = "INFO") -> logging.Logger:
     logger.info(f"Logging initialized at {level} level")
 
     return logger
+
+
+def get_logger(name: str) -> logging.Logger:
+    """Get a logger instance for the given name."""
+    return logging.getLogger(name)

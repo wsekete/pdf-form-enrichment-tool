@@ -1,0 +1,679 @@
+#!/usr/bin/env python3
+"""
+Field Extractor - Form field discovery and extraction functionality
+
+This module provides the FieldExtractor class for discovering and extracting
+form fields from PDF documents, along with the FormField data class for
+structured field information.
+"""
+
+from dataclasses import dataclass, field as dataclass_field
+from typing import List, Any, Dict, Optional, Union
+from pathlib import Path
+
+from pypdf import PdfReader
+from pypdf.generic import DictionaryObject, ArrayObject, IndirectObject
+
+from .pdf_analyzer import PDFAnalyzer
+from ..utils.errors import PDFProcessingError
+from ..utils.logging import get_logger
+
+logger = get_logger(__name__)
+
+
+@dataclass
+class FormField:
+    """
+    Represents a form field extracted from a PDF document.
+    
+    Contains all essential properties of a form field including
+    identification, type, location, and various metadata.
+    """
+    
+    id: str
+    name: str
+    field_type: str  # 'text', 'checkbox', 'radio', 'choice', 'signature', 'button'
+    page: int
+    rect: List[float]  # [x1, y1, x2, y2] - field coordinates
+    value: Any
+    properties: Dict[str, Any]
+    parent: Optional[str] = None
+    children: List[str] = dataclass_field(default_factory=list)
+    
+    def __post_init__(self):
+        """Validate field data after initialization."""
+        if not self.name:
+            self.name = f"Field_{self.id}"
+        
+        # Ensure rect has 4 coordinates
+        if len(self.rect) != 4:
+            logger.warning(f"Field {self.id}: Invalid rect coordinates, using defaults")
+            self.rect = [0.0, 0.0, 0.0, 0.0]
+        
+        # Ensure properties is a dict
+        if not isinstance(self.properties, dict):
+            self.properties = {}
+    
+    @property
+    def width(self) -> float:
+        """Get field width from coordinates."""
+        return abs(self.rect[2] - self.rect[0])
+    
+    @property
+    def height(self) -> float:
+        """Get field height from coordinates."""
+        return abs(self.rect[3] - self.rect[1])
+    
+    @property
+    def is_required(self) -> bool:
+        """Check if field is required."""
+        return self.properties.get("required", False)
+    
+    @property
+    def is_readonly(self) -> bool:
+        """Check if field is read-only."""
+        return self.properties.get("readonly", False)
+
+
+class FieldExtractor:
+    """
+    Extracts form fields from PDF documents.
+    
+    This class works with PDFAnalyzer to discover and extract form fields
+    from PDF AcroForm dictionaries, providing structured access to field
+    information including type, location, and properties.
+    """
+    
+    def __init__(self, pdf_analyzer: PDFAnalyzer):
+        """
+        Initialize FieldExtractor with a PDFAnalyzer instance.
+        
+        Args:
+            pdf_analyzer: Initialized PDFAnalyzer instance
+            
+        Raises:
+            PDFProcessingError: If PDF analyzer is invalid
+        """
+        if not pdf_analyzer or not pdf_analyzer.reader:
+            raise PDFProcessingError("Invalid PDFAnalyzer instance - reader not available")
+        
+        self.pdf_analyzer = pdf_analyzer
+        self.reader = pdf_analyzer.reader
+        self._field_cache: Optional[List[FormField]] = None
+        
+        logger.info(f"FieldExtractor initialized for: {pdf_analyzer.file_path}")
+    
+    def extract_form_fields(self, force_refresh: bool = False) -> List[FormField]:
+        """
+        Extract all form fields from PDF.
+        
+        Args:
+            force_refresh: If True, bypass cache and re-extract fields
+            
+        Returns:
+            List of FormField objects representing all fields in the PDF
+        """
+        # Return cached fields if available and not forcing refresh
+        if self._field_cache and not force_refresh:
+            logger.info(f"Returning {len(self._field_cache)} cached form fields")
+            return self._field_cache
+        
+        fields = []
+        
+        try:
+            # Check if PDF has form fields
+            if not self.pdf_analyzer.has_form_fields():
+                logger.info("PDF has no form fields")
+                self._field_cache = fields
+                return fields
+            
+            # Get AcroForm dictionary
+            catalog = self.reader.trailer.get("/Root")
+            if not catalog or "/AcroForm" not in catalog:
+                logger.warning("No AcroForm found in PDF catalog")
+                self._field_cache = fields
+                return fields
+            
+            acro_form = catalog["/AcroForm"]
+            
+            # Extract fields from AcroForm
+            if "/Fields" in acro_form:
+                field_array = acro_form["/Fields"]
+                logger.info(f"Found {len(field_array)} form fields in PDF")
+                
+                # Large form memory management
+                if len(field_array) > 1000:
+                    logger.warning(f"Large form detected ({len(field_array)} fields), consider chunked processing")
+                
+                field_counter = 0
+                for i, field_ref in enumerate(field_array):
+                    try:
+                        field_obj = field_ref.get_object() if isinstance(field_ref, IndirectObject) else field_ref
+                        if isinstance(field_obj, DictionaryObject):
+                            # Parse field and any child fields (for radio button groups)
+                            parsed_fields = self._parse_field_hierarchy(field_obj, field_counter)
+                            for field in parsed_fields:
+                                if field:
+                                    fields.append(field)
+                                    logger.debug(f"Extracted field: {field.name} ({field.field_type})")
+                            field_counter += len(parsed_fields)
+                    except Exception as e:
+                        logger.error(f"Error parsing field {i}: {str(e)}")
+                        continue
+            
+            logger.info(f"Successfully extracted {len(fields)} form fields")
+            self._field_cache = fields
+            return fields
+            
+        except Exception as e:
+            logger.error(f"Error extracting form fields: {str(e)}")
+            raise PDFProcessingError(f"Failed to extract form fields: {str(e)}")
+    
+    def _parse_field_hierarchy(self, field_obj: DictionaryObject, index: int) -> List[FormField]:
+        """
+        Parse field hierarchy including child fields for radio button groups.
+        
+        Args:
+            field_obj: PDF field dictionary object
+            index: Field index for ID generation
+            
+        Returns:
+            List of FormField instances (may be empty)
+        """
+        fields = []
+        
+        try:
+            # Check if this field has children (like radio button groups)
+            if "/Kids" in field_obj:
+                kids = field_obj["/Kids"]
+                if isinstance(kids, (list, ArrayObject)) and len(kids) > 0:
+                    # This is a parent field with children (likely radio group)
+                    parent_name = self._get_field_name(field_obj, index)
+                    logger.debug(f"Found parent field '{parent_name}' with {len(kids)} children")
+                    
+                    # Parse each child field
+                    for child_index, kid_ref in enumerate(kids):
+                        try:
+                            kid_obj = kid_ref.get_object() if isinstance(kid_ref, IndirectObject) else kid_ref
+                            if isinstance(kid_obj, DictionaryObject):
+                                # Use a proper integer index for child fields
+                                child_id_index = index * 100 + child_index  # Ensure unique integer IDs
+                                child_field = self._parse_field(kid_obj, child_id_index)
+                                if child_field:
+                                    # Set parent relationship
+                                    child_field.parent = parent_name
+                                    
+                                    # Improve child field naming for radio buttons
+                                    if child_field.field_type in ["radio", "checkbox"]:
+                                        # Try to get the export value for better naming
+                                        export_value = self._get_field_export_value(kid_obj)
+                                        if export_value and export_value != child_field.name:
+                                            child_field.name = f"{parent_name}__{export_value}"
+                                        elif child_field.name.startswith("Field_"):
+                                            child_field.name = f"{parent_name}__option_{child_index}"
+                                    
+                                    fields.append(child_field)
+                                    logger.debug(f"Extracted child field: {child_field.name} (parent: {parent_name})")
+                        except Exception as e:
+                            logger.warning(f"Error parsing child field {child_index} of {parent_name}: {str(e)}")
+                            continue
+                    
+                    # If we found children, ALSO include the parent as a separate field
+                    # Both the group (parent) and individual widgets (children) are valid fields
+                    if fields:
+                        # Add the parent group as a field too
+                        parent_field = self._parse_field(field_obj, index)
+                        if parent_field:
+                            # Mark this as a parent group
+                            parent_field.properties["is_group_container"] = True
+                            fields.insert(0, parent_field)  # Add parent first
+                        return fields
+            
+            # No children or no valid children found - parse as regular field
+            field = self._parse_field(field_obj, index)
+            if field:
+                fields.append(field)
+                
+        except Exception as e:
+            logger.error(f"Error parsing field hierarchy {index}: {str(e)}")
+        
+        return fields
+    
+    def _parse_field(self, field_obj: DictionaryObject, index: int) -> Optional[FormField]:
+        """
+        Parse individual field object into FormField instance.
+        
+        Args:
+            field_obj: PDF field dictionary object
+            index: Field index for ID generation
+            
+        Returns:
+            FormField instance or None if parsing fails
+        """
+        try:
+            # Extract basic field properties
+            field_name = self._get_field_name(field_obj, index)
+            field_type = self._determine_field_type(field_obj)
+            field_value = self._get_field_value(field_obj)
+            field_rect = self._get_field_rect(field_obj)
+            page_num = self._find_field_page(field_obj)
+            
+            # Extract field properties and flags
+            properties = self._extract_field_properties(field_obj)
+            
+            # Create field ID
+            field_id = f"field_{index:03d}"
+            
+            return FormField(
+                id=field_id,
+                name=field_name,
+                field_type=field_type,
+                page=page_num,
+                rect=field_rect,
+                value=field_value,
+                properties=properties
+            )
+            
+        except Exception as e:
+            logger.error(f"Error parsing field {index}: {str(e)}")
+            return None
+    
+    def _get_field_name(self, field_obj: DictionaryObject, index: int) -> str:
+        """Extract field name from field object."""
+        try:
+            # Try partial name first (/T), then full name (/TU)
+            if "/T" in field_obj:
+                name = str(field_obj["/T"])
+                return name if name else f"Field_{index}"
+            elif "/TU" in field_obj:
+                name = str(field_obj["/TU"])
+                return name if name else f"Field_{index}"
+            else:
+                return f"Field_{index}"
+        except Exception:
+            return f"Field_{index}"
+    
+    def _determine_field_type(self, field_obj: DictionaryObject) -> str:
+        """
+        Determine the type of form field.
+        
+        PDF field types:
+        - /Tx: Text field
+        - /Btn: Button field (checkbox, radio, pushbutton)
+        - /Ch: Choice field (dropdown, listbox)
+        - /Sig: Signature field
+        """
+        try:
+            ft = field_obj.get("/FT")
+            
+            if ft == "/Tx":
+                return "text"
+            elif ft == "/Btn":
+                # Distinguish between checkbox, radio, and pushbutton
+                ff = field_obj.get("/Ff", 0)
+                if isinstance(ff, int):
+                    # Bit 16 (32768): Radio button
+                    if ff & 32768:
+                        return "radio"
+                    # Bit 15 (16384): Pushbutton
+                    elif ff & 16384:
+                        return "button"
+                    else:
+                        return "checkbox"
+                else:
+                    return "checkbox"  # Default for button fields
+            elif ft == "/Ch":
+                # Could be dropdown or listbox
+                ff = field_obj.get("/Ff", 0)
+                if isinstance(ff, int) and (ff & 131072):  # Bit 18: Combo
+                    return "dropdown"
+                else:
+                    return "listbox"
+            elif ft == "/Sig":
+                return "signature"
+            elif ft is None:
+                # Widget annotation without explicit field type
+                # Check if it has appearance states (likely radio/checkbox)
+                if "/AP" in field_obj:
+                    ap = field_obj["/AP"]
+                    if isinstance(ap, DictionaryObject) and "/N" in ap:
+                        normal_ap = ap["/N"]
+                        if isinstance(normal_ap, DictionaryObject):
+                            # If it has /Off state, it's likely a radio button or checkbox
+                            states = list(normal_ap.keys())
+                            if any(str(state) in ["/Off", "/No"] for state in states):
+                                # Default to radio for widget annotations (most common case)
+                                return "radio"
+                
+                # Check if it's a widget annotation
+                if "/Subtype" in field_obj and field_obj.get("/Subtype") == "/Widget":
+                    return "radio"  # Most widget annotations are radio buttons
+                
+                return "unknown"
+            else:
+                logger.warning(f"Unknown field type: {ft}")
+                return "unknown"
+                
+        except Exception as e:
+            logger.warning(f"Error determining field type: {str(e)}")
+            return "unknown"
+    
+    def _get_field_value(self, field_obj: DictionaryObject) -> Any:
+        """Extract field value."""
+        try:
+            value = field_obj.get("/V")
+            if value is not None:
+                return str(value)
+            # Try default value if no current value
+            default_value = field_obj.get("/DV")
+            return str(default_value) if default_value is not None else ""
+        except Exception:
+            return ""
+    
+    def _get_field_rect(self, field_obj: DictionaryObject) -> List[float]:
+        """Extract field rectangle coordinates."""
+        try:
+            rect = field_obj.get("/Rect")
+            if rect and len(rect) >= 4:
+                return [float(x) for x in rect[:4]]
+            else:
+                logger.warning("Invalid or missing field rectangle")
+                return [0.0, 0.0, 0.0, 0.0]
+        except Exception as e:
+            logger.warning(f"Error extracting field rectangle: {str(e)}")
+            return [0.0, 0.0, 0.0, 0.0]
+    
+    def _find_field_page(self, field_obj: DictionaryObject) -> int:
+        """
+        Find which page contains this field.
+        
+        This is a simplified implementation. In practice, you'd need to
+        traverse the page tree and check for widget annotations.
+        """
+        try:
+            # Check if field has page reference
+            if "/P" in field_obj:
+                # Field references its page directly
+                page_ref = field_obj["/P"]
+                if isinstance(page_ref, IndirectObject):
+                    # Find this page in the pages array
+                    for i, page in enumerate(self.reader.pages):
+                        if page.indirect_reference == page_ref:
+                            return i + 1
+            
+            # Fallback: check all pages for widget annotations
+            # This is more complex and resource-intensive
+            for page_num, page in enumerate(self.reader.pages, 1):
+                if "/Annots" in page:
+                    annotations = page["/Annots"]
+                    if isinstance(annotations, ArrayObject):
+                        for annot_ref in annotations:
+                            try:
+                                annot = annot_ref.get_object() if isinstance(annot_ref, IndirectObject) else annot_ref
+                                if isinstance(annot, DictionaryObject):
+                                    # Check if this annotation references our field
+                                    if "/Parent" in annot and annot["/Parent"] == field_obj:
+                                        return page_num
+                            except Exception:
+                                continue
+            
+            # Default to page 1 if we can't determine the page
+            return 1
+            
+        except Exception as e:
+            logger.warning(f"Error finding field page: {str(e)}")
+            return 1
+    
+    def _extract_field_properties(self, field_obj: DictionaryObject) -> Dict[str, Any]:
+        """Extract field properties and flags."""
+        properties = {}
+        
+        try:
+            # Extract field flags (/Ff)
+            ff = field_obj.get("/Ff", 0)
+            if isinstance(ff, int):
+                properties.update({
+                    "readonly": bool(ff & 1),           # Bit 1
+                    "required": bool(ff & 2),           # Bit 2
+                    "no_export": bool(ff & 4),          # Bit 3
+                    "multiline": bool(ff & 4096),       # Bit 13 (text fields)
+                    "password": bool(ff & 8192),        # Bit 14 (text fields)
+                    "radio": bool(ff & 32768),          # Bit 16 (button fields)
+                    "pushbutton": bool(ff & 16384),     # Bit 15 (button fields)
+                    "combo": bool(ff & 131072),         # Bit 18 (choice fields)
+                })
+            
+            # Extract other properties
+            properties.update({
+                "tooltip": str(field_obj.get("/TU", "")),  # User name/tooltip
+                "mapping_name": str(field_obj.get("/TM", "")),  # Mapping name
+                "alternate_name": str(field_obj.get("/T", "")),  # Partial field name
+                "max_length": field_obj.get("/MaxLen"),  # Maximum text length
+            })
+            
+            # Extract options for choice fields
+            if "/Opt" in field_obj:
+                options = field_obj["/Opt"]
+                if isinstance(options, (list, ArrayObject)):
+                    try:
+                        # Handle both direct values and indirect references
+                        option_list = []
+                        for opt in options:
+                            if hasattr(opt, 'get_object'):
+                                option_list.append(str(opt.get_object()))
+                            else:
+                                option_list.append(str(opt))
+                        properties["options"] = option_list
+                    except Exception as e:
+                        logger.warning(f"Error extracting options: {str(e)}")
+                        properties["options"] = []
+            
+            # Extract default appearance
+            if "/DA" in field_obj:
+                properties["default_appearance"] = str(field_obj["/DA"])
+            
+        except Exception as e:
+            logger.warning(f"Error extracting field properties: {str(e)}")
+            properties["extraction_error"] = str(e)
+        
+        return properties
+    
+    def _get_field_export_value(self, field_obj: DictionaryObject) -> Optional[str]:
+        """
+        Extract export value from radio button or checkbox widget.
+        
+        For radio buttons, this is often the value that gets exported when selected.
+        Can be found in /AS (appearance state) or /AP (appearance dictionary).
+        """
+        try:
+            # Try appearance state first
+            if "/AS" in field_obj:
+                as_value = field_obj["/AS"]
+                if as_value and str(as_value) not in ["/Off", "/No"]:
+                    return str(as_value).lstrip("/")
+            
+            # Try appearance dictionary
+            if "/AP" in field_obj:
+                ap = field_obj["/AP"]
+                if isinstance(ap, DictionaryObject) and "/N" in ap:
+                    normal_ap = ap["/N"]
+                    if isinstance(normal_ap, DictionaryObject):
+                        # Get the keys (excluding /Off)
+                        keys = [str(k).lstrip("/") for k in normal_ap.keys() 
+                               if str(k) not in ["/Off", "/No"]]
+                        if keys:
+                            return keys[0]  # Take the first non-off state
+            
+            # Try checking for /V value
+            if "/V" in field_obj:
+                value = field_obj["/V"]
+                if value and str(value) not in ["Off", "No", ""]:
+                    return str(value).lstrip("/")
+            
+            return None
+            
+        except Exception as e:
+            logger.debug(f"Error extracting export value: {str(e)}")
+            return None
+    
+    def get_field_statistics(self, fields: Optional[List[FormField]] = None) -> Dict[str, Any]:
+        """
+        Get comprehensive statistics about form fields.
+        
+        Args:
+            fields: List of FormField objects. If None, extracts fields first.
+            
+        Returns:
+            Dictionary containing field statistics
+        """
+        if fields is None:
+            fields = self.extract_form_fields()
+        
+        stats = {
+            "total_fields": len(fields),
+            "field_types": {},
+            "pages_with_fields": set(),
+            "required_fields": 0,
+            "readonly_fields": 0,
+            "fields_with_values": 0,
+            "average_field_size": 0.0,
+            "field_distribution": {}
+        }
+        
+        if not fields:
+            stats["pages_with_fields"] = 0
+            return stats
+        
+        total_area = 0.0
+        
+        for field in fields:
+            # Count by type
+            field_type = field.field_type
+            if field_type not in stats["field_types"]:
+                stats["field_types"][field_type] = 0
+            stats["field_types"][field_type] += 1
+            
+            # Track pages
+            stats["pages_with_fields"].add(field.page)
+            
+            # Count field properties
+            if field.is_required:
+                stats["required_fields"] += 1
+            
+            if field.is_readonly:
+                stats["readonly_fields"] += 1
+            
+            if field.value and str(field.value).strip():
+                stats["fields_with_values"] += 1
+            
+            # Calculate field area
+            area = field.width * field.height
+            total_area += area
+        
+        # Convert pages set to count
+        stats["pages_with_fields"] = len(stats["pages_with_fields"])
+        
+        # Calculate average field size
+        if len(fields) > 0:
+            stats["average_field_size"] = total_area / len(fields)
+        
+        # Add percentage distributions
+        if stats["total_fields"] > 0:
+            stats["field_distribution"] = {
+                "required_percentage": (stats["required_fields"] / stats["total_fields"]) * 100,
+                "readonly_percentage": (stats["readonly_fields"] / stats["total_fields"]) * 100,
+                "filled_percentage": (stats["fields_with_values"] / stats["total_fields"]) * 100
+            }
+        
+        return stats
+    
+    def find_fields_by_type(self, field_type: str, fields: Optional[List[FormField]] = None) -> List[FormField]:
+        """
+        Find all fields of a specific type.
+        
+        Args:
+            field_type: Type of field to find ('text', 'checkbox', etc.)
+            fields: List of FormField objects. If None, extracts fields first.
+            
+        Returns:
+            List of fields matching the specified type
+        """
+        if fields is None:
+            fields = self.extract_form_fields()
+        
+        return [field for field in fields if field.field_type == field_type]
+    
+    def find_fields_by_page(self, page_number: int, fields: Optional[List[FormField]] = None) -> List[FormField]:
+        """
+        Find all fields on a specific page.
+        
+        Args:
+            page_number: Page number (1-based)
+            fields: List of FormField objects. If None, extracts fields first.
+            
+        Returns:
+            List of fields on the specified page
+        """
+        if fields is None:
+            fields = self.extract_form_fields()
+        
+        return [field for field in fields if field.page == page_number]
+    
+    def validate_field_structure(self, fields: Optional[List[FormField]] = None) -> Dict[str, Any]:
+        """
+        Validate the structure and integrity of extracted fields.
+        
+        Args:
+            fields: List of FormField objects. If None, extracts fields first.
+            
+        Returns:
+            Validation report with issues and statistics
+        """
+        if fields is None:
+            fields = self.extract_form_fields()
+        
+        validation_report = {
+            "total_fields": len(fields),
+            "valid_fields": 0,
+            "issues": [],
+            "warnings": [],
+            "field_names": [],
+            "duplicate_names": []
+        }
+        
+        field_names = []
+        
+        for field in fields:
+            is_valid = True
+            
+            # Check field name
+            if not field.name or field.name.startswith("Field_"):
+                validation_report["warnings"].append(f"Field {field.id} has auto-generated name: {field.name}")
+            
+            # Check field coordinates
+            if all(coord == 0.0 for coord in field.rect):
+                validation_report["issues"].append(f"Field {field.id} has invalid coordinates: {field.rect}")
+                is_valid = False
+            
+            # Check page number
+            if field.page < 1 or field.page > self.pdf_analyzer.get_page_count():
+                validation_report["issues"].append(f"Field {field.id} has invalid page number: {field.page}")
+                is_valid = False
+            
+            # Track field names for duplicate detection
+            field_names.append(field.name)
+            
+            if is_valid:
+                validation_report["valid_fields"] += 1
+        
+        # Check for duplicate names
+        seen_names = set()
+        for name in field_names:
+            if name in seen_names:
+                validation_report["duplicate_names"].append(name)
+            else:
+                seen_names.add(name)
+        
+        validation_report["field_names"] = field_names
+        
+        return validation_report

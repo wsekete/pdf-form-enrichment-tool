@@ -11,6 +11,7 @@ import click
 
 from . import __version__
 from .core.pdf_analyzer import PDFAnalyzer
+from .core.field_extractor import FieldExtractor
 from .utils.errors import PDFProcessingError
 from .utils.logging import setup_logging
 
@@ -55,6 +56,30 @@ def process(ctx: click.Context, pdf_path: str, output: str, review: bool, passwo
         
         if analyzer.has_form_fields():
             click.echo("🎯 Form fields detected - ready for BEM naming!")
+            
+            # Extract form fields
+            extractor = FieldExtractor(analyzer)
+            fields = extractor.extract_form_fields()
+            
+            if fields:
+                click.echo(f"📝 Found {len(fields)} form fields:")
+                stats = extractor.get_field_statistics(fields)
+                
+                # Display field type breakdown
+                for field_type, count in stats["field_types"].items():
+                    click.echo(f"  • {field_type}: {count} fields")
+                
+                click.echo(f"📊 Fields on {stats['pages_with_fields']} pages")
+                click.echo(f"🔒 Required fields: {stats['required_fields']}")
+                
+                if verbose:
+                    click.echo("\n📋 Field Details:")
+                    for field in fields[:10]:  # Show first 10 fields
+                        click.echo(f"  • {field.name} ({field.field_type}) - Page {field.page}")
+                    if len(fields) > 10:
+                        click.echo(f"  ... and {len(fields) - 10} more fields")
+            else:
+                click.echo("⚠️  No form fields could be extracted")
         else:
             click.echo("⚠️  No form fields found in this PDF")
         
@@ -68,6 +93,36 @@ def process(ctx: click.Context, pdf_path: str, output: str, review: bool, passwo
             metadata_file = output_dir / f"{Path(pdf_path).stem}_analysis.json"
             analyzer.export_metadata_json(metadata_file)
             click.echo(f"📋 Analysis exported to: {metadata_file}")
+            
+            # Export field data if available
+            if analyzer.has_form_fields():
+                try:
+                    extractor = FieldExtractor(analyzer)
+                    fields = extractor.extract_form_fields()
+                    if fields:
+                        fields_file = output_dir / f"{Path(pdf_path).stem}_fields.json"
+                        import json
+                        fields_data = {
+                            "fields": [
+                                {
+                                    "id": field.id,
+                                    "name": field.name,
+                                    "type": field.field_type,
+                                    "page": field.page,
+                                    "rect": field.rect,
+                                    "value": field.value,
+                                    "properties": field.properties
+                                }
+                                for field in fields
+                            ],
+                            "statistics": extractor.get_field_statistics(fields),
+                            "validation": extractor.validate_field_structure(fields)
+                        }
+                        with open(fields_file, 'w') as f:
+                            json.dump(fields_data, f, indent=2, default=str)
+                        click.echo(f"📝 Field data exported to: {fields_file}")
+                except Exception as e:
+                    click.echo(f"⚠️  Field export failed: {e}")
         
         if review:
             click.echo("\n⚙️ Review mode enabled")
@@ -75,8 +130,9 @@ def process(ctx: click.Context, pdf_path: str, output: str, review: bool, passwo
         
         click.echo("\n🎯 Next steps:")
         click.echo("1. ✅ Task 1.2 completed - PDF parsing working!")
-        click.echo("2. 🚧 Next: Implement Task 1.3 - Form field extraction")
-        click.echo("3. 🚧 Then: Add AI integration for BEM naming")
+        click.echo("2. ✅ Task 1.3 completed - Form field extraction working!")
+        click.echo("3. 🚧 Next: Implement Task 1.4 - Field context extraction")
+        click.echo("4. 🚧 Then: Add AI integration for BEM naming")
         
     except PDFProcessingError as e:
         click.echo(f"❌ PDF processing error: {e}", err=True)
@@ -110,6 +166,45 @@ def analyze(ctx: click.Context, pdf_path: str, password: str, export: str):
         
         # Display comprehensive analysis
         click.echo(analyzer.get_summary())
+        
+        # Extract and display form fields if available
+        if analyzer.has_form_fields():
+            try:
+                extractor = FieldExtractor(analyzer)
+                fields = extractor.extract_form_fields()
+                
+                if fields:
+                    click.echo(f"\n📝 Form Field Analysis ({len(fields)} fields):")
+                    stats = extractor.get_field_statistics(fields)
+                    
+                    # Display statistics
+                    click.echo(f"  📊 Field Types:")
+                    for field_type, count in stats["field_types"].items():
+                        click.echo(f"    • {field_type}: {count}")
+                    
+                    click.echo(f"  📄 Distribution: {stats['pages_with_fields']} pages with fields")
+                    click.echo(f"  🔒 Required: {stats['required_fields']} fields")
+                    click.echo(f"  📝 Filled: {stats['fields_with_values']} fields")
+                    
+                    # Show validation report
+                    validation = extractor.validate_field_structure(fields)
+                    click.echo(f"  ✅ Valid: {validation['valid_fields']}/{validation['total_fields']} fields")
+                    
+                    if validation['issues']:
+                        click.echo(f"  ⚠️  Issues found:")
+                        for issue in validation['issues'][:5]:  # Show first 5 issues
+                            click.echo(f"    • {issue}")
+                    
+                    if verbose:
+                        click.echo(f"\n📋 Field List:")
+                        for field in fields:
+                            req_indicator = "🔒" if field.is_required else "  "
+                            click.echo(f"    {req_indicator} {field.name} ({field.field_type}) - Page {field.page}")
+                            if field.value:
+                                click.echo(f"      Value: {field.value}")
+                
+            except Exception as e:
+                click.echo(f"⚠️  Field extraction failed: {e}")
         
         # Display detailed metadata if verbose
         if verbose:

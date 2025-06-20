@@ -677,3 +677,422 @@ class FieldExtractor:
         validation_report["field_names"] = field_names
         
         return validation_report
+
+
+@dataclass
+class FieldContext:
+    """
+    Represents contextual information extracted around a form field.
+    
+    This includes nearby text, labels, section headers, and other contextual
+    information that can be used for intelligent field naming.
+    """
+    
+    field_id: str
+    nearby_text: List[str] = dataclass_field(default_factory=list)
+    section_header: str = ""
+    label: str = ""
+    confidence: float = 0.0
+    visual_group: str = ""
+    text_above: str = ""
+    text_below: str = ""
+    text_left: str = ""
+    text_right: str = ""
+    context_properties: Dict[str, Any] = dataclass_field(default_factory=dict)
+
+
+class ContextExtractor:
+    """
+    Extracts contextual information around form fields for intelligent naming.
+    
+    This class analyzes PDF page content to identify labels, section headers,
+    and other contextual elements that can help generate meaningful field names.
+    """
+    
+    def __init__(self, pdf_analyzer: PDFAnalyzer):
+        """
+        Initialize the context extractor.
+        
+        Args:
+            pdf_analyzer: PDFAnalyzer instance for accessing PDF content
+        """
+        self.pdf_analyzer = pdf_analyzer
+        self.reader = pdf_analyzer.reader
+        self._page_texts = {}  # Cache for extracted page texts
+        self._text_elements = {}  # Cache for text elements with positions
+        
+    def extract_field_context(self, field: FormField) -> FieldContext:
+        """
+        Extract contextual information for a specific field.
+        
+        Args:
+            field: FormField instance to extract context for
+            
+        Returns:
+            FieldContext instance with extracted contextual information
+        """
+        try:
+            # Get page text if not cached
+            page_text = self._get_page_text(field.page)
+            
+            # Extract text elements with positions (simplified approach)
+            text_elements = self._extract_text_elements(field.page)
+            
+            # Find nearby text based on field coordinates
+            nearby_text = self._find_nearby_text(text_elements, field.rect)
+            
+            # Detect probable field label
+            label = self._detect_field_label(nearby_text, field.rect)
+            
+            # Find section header
+            section_header = self._find_section_header(page_text, field.rect)
+            
+            # Determine visual grouping
+            visual_group = self._determine_visual_group(field, text_elements)
+            
+            # Extract directional text
+            text_above = self._extract_directional_text(text_elements, field.rect, "above")
+            text_below = self._extract_directional_text(text_elements, field.rect, "below")
+            text_left = self._extract_directional_text(text_elements, field.rect, "left")
+            text_right = self._extract_directional_text(text_elements, field.rect, "right")
+            
+            # Calculate confidence score
+            confidence = self._calculate_context_confidence(
+                label, nearby_text, section_header, text_above, text_left
+            )
+            
+            # Build context properties
+            context_properties = {
+                "field_type": field.field_type,
+                "field_name": field.name,
+                "page_number": field.page,
+                "coordinates": field.rect,
+                "extraction_method": "proximity_analysis"
+            }
+            
+            return FieldContext(
+                field_id=field.id,
+                nearby_text=nearby_text,
+                section_header=section_header,
+                label=label,
+                confidence=confidence,
+                visual_group=visual_group,
+                text_above=text_above,
+                text_below=text_below,
+                text_left=text_left,
+                text_right=text_right,
+                context_properties=context_properties
+            )
+            
+        except Exception as e:
+            logger.error(f"Error extracting context for field {field.id}: {str(e)}")
+            return FieldContext(
+                field_id=field.id,
+                confidence=0.0,
+                context_properties={"error": str(e)}
+            )
+    
+    def extract_all_contexts(self, fields: List[FormField]) -> Dict[str, FieldContext]:
+        """
+        Extract context for all fields in the list.
+        
+        Args:
+            fields: List of FormField instances
+            
+        Returns:
+            Dictionary mapping field IDs to their contexts
+        """
+        contexts = {}
+        
+        for field in fields:
+            context = self.extract_field_context(field)
+            contexts[field.id] = context
+            
+        return contexts
+    
+    def _get_page_text(self, page_num: int) -> str:
+        """
+        Get text content for a specific page (with caching).
+        
+        Args:
+            page_num: Page number (1-based)
+            
+        Returns:
+            Page text content
+        """
+        if page_num not in self._page_texts:
+            try:
+                if 1 <= page_num <= len(self.reader.pages):
+                    page = self.reader.pages[page_num - 1]
+                    self._page_texts[page_num] = page.extract_text()
+                else:
+                    self._page_texts[page_num] = ""
+            except Exception as e:
+                logger.warning(f"Error extracting text from page {page_num}: {str(e)}")
+                self._page_texts[page_num] = ""
+        
+        return self._page_texts[page_num]
+    
+    def _extract_text_elements(self, page_num: int) -> List[Dict[str, Any]]:
+        """
+        Extract text elements with approximate positions.
+        
+        This is a simplified approach using line-based text extraction.
+        A more sophisticated implementation would parse the page content stream.
+        
+        Args:
+            page_num: Page number (1-based)
+            
+        Returns:
+            List of text elements with position information
+        """
+        if page_num not in self._text_elements:
+            try:
+                page_text = self._get_page_text(page_num)
+                elements = []
+                
+                # Split text into lines and create approximate positions
+                lines = page_text.split('\n')
+                y_position = 800  # Start from top of page (approximate)
+                
+                for i, line in enumerate(lines):
+                    line = line.strip()
+                    if line:
+                        # Approximate positioning (real implementation would need content stream parsing)
+                        elements.append({
+                            'text': line,
+                            'x': 100,  # Approximate left margin
+                            'y': y_position,
+                            'width': len(line) * 6,  # Approximate width
+                            'height': 12,  # Approximate line height
+                            'line_index': i
+                        })
+                        y_position -= 15  # Move down for next line
+                
+                self._text_elements[page_num] = elements
+                
+            except Exception as e:
+                logger.warning(f"Error extracting text elements from page {page_num}: {str(e)}")
+                self._text_elements[page_num] = []
+        
+        return self._text_elements[page_num]
+    
+    def _find_nearby_text(self, text_elements: List[Dict[str, Any]], field_rect: List[float]) -> List[str]:
+        """
+        Find text elements near the field coordinates.
+        
+        Args:
+            text_elements: List of text elements with positions
+            field_rect: Field coordinates [x1, y1, x2, y2]
+            
+        Returns:
+            List of nearby text strings
+        """
+        if not text_elements or len(field_rect) != 4:
+            return []
+        
+        nearby_text = []
+        field_x, field_y = field_rect[0], field_rect[1]
+        proximity_threshold = 100  # Pixels
+        
+        for element in text_elements:
+            text = element.get('text', '').strip()
+            if not text:
+                continue
+                
+            # Calculate distance from field
+            text_x, text_y = element.get('x', 0), element.get('y', 0)
+            distance = ((text_x - field_x) ** 2 + (text_y - field_y) ** 2) ** 0.5
+            
+            if distance <= proximity_threshold:
+                nearby_text.append(text)
+        
+        # Sort by relevance (labels, questions, etc.)
+        nearby_text.sort(key=lambda x: (
+            0 if ':' in x else 1,  # Prefer text with colons (labels)
+            0 if '?' in x else 1,  # Prefer questions
+            0 if len(x.split()) <= 5 else 1,  # Prefer short text
+            len(x)  # Shorter first
+        ))
+        
+        return nearby_text[:10]  # Limit to most relevant
+    
+    def _detect_field_label(self, nearby_text: List[str], field_rect: List[float]) -> str:
+        """
+        Detect the most likely label for the field.
+        
+        Args:
+            nearby_text: List of nearby text strings
+            field_rect: Field coordinates
+            
+        Returns:
+            Detected label text
+        """
+        if not nearby_text:
+            return ""
+        
+        # Look for text that ends with colon (common label pattern)
+        for text in nearby_text:
+            if text.strip().endswith(':'):
+                return text.strip().rstrip(':')
+        
+        # Look for text that contains common field indicators
+        field_indicators = ['name', 'address', 'phone', 'email', 'date', 'amount', 'signature']
+        for text in nearby_text:
+            text_lower = text.lower()
+            for indicator in field_indicators:
+                if indicator in text_lower:
+                    return text.strip()
+        
+        # Fall back to first nearby text if it's reasonably short
+        first_text = nearby_text[0].strip()
+        if len(first_text.split()) <= 5:
+            return first_text
+        
+        return ""
+    
+    def _find_section_header(self, page_text: str, field_rect: List[float]) -> str:
+        """
+        Find the section header for this field.
+        
+        Args:
+            page_text: Full page text content
+            field_rect: Field coordinates
+            
+        Returns:
+            Section header text
+        """
+        if not page_text:
+            return ""
+        
+        lines = page_text.split('\n')
+        
+        # Look for lines that might be section headers
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+                
+            # Common section header patterns
+            if (line.isupper() or 
+                'section' in line.lower() or 
+                'part' in line.lower() or
+                'information' in line.lower() or
+                line.endswith(':') and len(line.split()) <= 4):
+                return line.rstrip(':')
+        
+        return ""
+    
+    def _determine_visual_group(self, field: FormField, text_elements: List[Dict[str, Any]]) -> str:
+        """
+        Determine visual grouping for the field based on layout.
+        
+        Args:
+            field: FormField instance
+            text_elements: Text elements for context
+            
+        Returns:
+            Visual group identifier
+        """
+        if len(field.rect) != 4:
+            return "unknown"
+        
+        # Simple grouping based on vertical position
+        field_y = field.rect[1]
+        
+        if field_y > 700:
+            return "header_section"
+        elif field_y > 500:
+            return "upper_section"
+        elif field_y > 300:
+            return "middle_section"
+        elif field_y > 100:
+            return "lower_section"
+        else:
+            return "footer_section"
+    
+    def _extract_directional_text(self, text_elements: List[Dict[str, Any]], 
+                                 field_rect: List[float], direction: str) -> str:
+        """
+        Extract text in a specific direction from the field.
+        
+        Args:
+            text_elements: Text elements with positions
+            field_rect: Field coordinates
+            direction: Direction to look ('above', 'below', 'left', 'right')
+            
+        Returns:
+            Text found in the specified direction
+        """
+        if not text_elements or len(field_rect) != 4:
+            return ""
+        
+        field_x, field_y = field_rect[0], field_rect[1]
+        field_width, field_height = field_rect[2] - field_rect[0], field_rect[3] - field_rect[1]
+        
+        candidates = []
+        
+        for element in text_elements:
+            text = element.get('text', '').strip()
+            if not text:
+                continue
+                
+            text_x, text_y = element.get('x', 0), element.get('y', 0)
+            
+            # Check if text is in the specified direction
+            if direction == 'above' and text_y > field_y + field_height:
+                candidates.append((text, abs(text_y - (field_y + field_height))))
+            elif direction == 'below' and text_y < field_y:
+                candidates.append((text, abs(field_y - text_y)))
+            elif direction == 'left' and text_x < field_x:
+                candidates.append((text, abs(field_x - text_x)))
+            elif direction == 'right' and text_x > field_x + field_width:
+                candidates.append((text, abs(text_x - (field_x + field_width))))
+        
+        # Return closest text in the specified direction
+        if candidates:
+            candidates.sort(key=lambda x: x[1])  # Sort by distance
+            return candidates[0][0]
+        
+        return ""
+    
+    def _calculate_context_confidence(self, label: str, nearby_text: List[str], 
+                                    section_header: str, text_above: str, 
+                                    text_left: str) -> float:
+        """
+        Calculate confidence score for context extraction.
+        
+        Args:
+            label: Detected field label
+            nearby_text: List of nearby text
+            section_header: Section header
+            text_above: Text above the field
+            text_left: Text to the left of the field
+            
+        Returns:
+            Confidence score between 0.0 and 1.0
+        """
+        confidence = 0.3  # Base confidence
+        
+        # Boost confidence for clear label
+        if label:
+            if ':' in label or any(word in label.lower() for word in ['name', 'address', 'email', 'phone']):
+                confidence += 0.3
+            else:
+                confidence += 0.1
+        
+        # Boost for substantial nearby text
+        if len(nearby_text) >= 3:
+            confidence += 0.2
+        elif len(nearby_text) >= 1:
+            confidence += 0.1
+        
+        # Boost for section header
+        if section_header:
+            confidence += 0.1
+        
+        # Boost for directional text
+        if text_above or text_left:
+            confidence += 0.1
+        
+        return min(confidence, 1.0)

@@ -9,7 +9,7 @@ import pytest
 from unittest.mock import Mock, patch
 from pathlib import Path
 
-from pdf_form_editor.core.field_extractor import FieldExtractor, FormField
+from pdf_form_editor.core.field_extractor import FieldExtractor, FormField, FieldContext, ContextExtractor
 from pdf_form_editor.core.pdf_analyzer import PDFAnalyzer
 from pdf_form_editor.utils.errors import PDFProcessingError
 
@@ -293,3 +293,313 @@ class TestFieldExtractorIntegration:
         assert parent_field.name == "parent_group"
         assert child_field.name == "parent_group__option_0"  # Fallback naming
         assert child_field.parent == "parent_group"
+
+
+class TestFieldContext:
+    """Test cases for FieldContext data class."""
+    
+    def test_field_context_creation(self):
+        """Test basic FieldContext creation."""
+        context = FieldContext(
+            field_id="field_001",
+            nearby_text=["First Name:", "Enter your first name"],
+            section_header="Personal Information",
+            label="First Name",
+            confidence=0.8,
+            visual_group="upper_section",
+            text_above="Personal Information",
+            text_left="First Name:",
+            context_properties={"extraction_method": "proximity_analysis"}
+        )
+        
+        assert context.field_id == "field_001"
+        assert len(context.nearby_text) == 2
+        assert context.section_header == "Personal Information"
+        assert context.label == "First Name"
+        assert context.confidence == 0.8
+        assert context.visual_group == "upper_section"
+        assert context.text_above == "Personal Information"
+        assert context.text_left == "First Name:"
+        assert context.context_properties["extraction_method"] == "proximity_analysis"
+    
+    def test_field_context_defaults(self):
+        """Test FieldContext with default values."""
+        context = FieldContext(field_id="field_002")
+        
+        assert context.field_id == "field_002"
+        assert context.nearby_text == []
+        assert context.section_header == ""
+        assert context.label == ""
+        assert context.confidence == 0.0
+        assert context.visual_group == ""
+        assert context.text_above == ""
+        assert context.text_below == ""
+        assert context.text_left == ""
+        assert context.text_right == ""
+        assert context.context_properties == {}
+
+
+class TestContextExtractor:
+    """Test cases for ContextExtractor class."""
+    
+    def setup_method(self):
+        """Set up test fixtures."""
+        self.mock_analyzer = Mock(spec=PDFAnalyzer)
+        self.mock_reader = Mock()
+        self.mock_analyzer.reader = self.mock_reader
+        
+        # Mock a page with extract_text method
+        self.mock_page = Mock()
+        self.mock_page.extract_text.return_value = """
+        PERSONAL INFORMATION SECTION
+        
+        First Name: [text field here]
+        Last Name: [text field here]
+        
+        CONTACT INFORMATION
+        
+        Email Address: [text field here]
+        Phone Number: [text field here]
+        """
+        
+        self.mock_reader.pages = [self.mock_page]
+        
+        # Sample field for testing
+        self.sample_field = FormField(
+            id="field_001",
+            name="first_name",
+            field_type="text",
+            page=1,
+            rect=[200.0, 600.0, 400.0, 625.0],
+            value="",
+            properties={}
+        )
+    
+    def test_context_extractor_initialization(self):
+        """Test ContextExtractor initialization."""
+        extractor = ContextExtractor(self.mock_analyzer)
+        
+        assert extractor.pdf_analyzer == self.mock_analyzer
+        assert extractor.reader == self.mock_reader
+        assert extractor._page_texts == {}
+        assert extractor._text_elements == {}
+    
+    def test_get_page_text_caching(self):
+        """Test page text extraction with caching."""
+        extractor = ContextExtractor(self.mock_analyzer)
+        
+        # First call should extract text
+        text1 = extractor._get_page_text(1)
+        assert "PERSONAL INFORMATION" in text1
+        assert self.mock_page.extract_text.call_count == 1
+        
+        # Second call should use cache
+        text2 = extractor._get_page_text(1)
+        assert text1 == text2
+        assert self.mock_page.extract_text.call_count == 1  # Still just one call
+    
+    def test_get_page_text_invalid_page(self):
+        """Test page text extraction for invalid page numbers."""
+        extractor = ContextExtractor(self.mock_analyzer)
+        
+        # Page 0 (invalid)
+        text = extractor._get_page_text(0)
+        assert text == ""
+        
+        # Page beyond range
+        text = extractor._get_page_text(10)
+        assert text == ""
+    
+    def test_extract_text_elements(self):
+        """Test text element extraction with positioning."""
+        extractor = ContextExtractor(self.mock_analyzer)
+        
+        elements = extractor._extract_text_elements(1)
+        
+        # Should have multiple text elements
+        assert len(elements) > 0
+        
+        # Check element structure
+        first_element = elements[0]
+        assert 'text' in first_element
+        assert 'x' in first_element
+        assert 'y' in first_element
+        assert 'width' in first_element
+        assert 'height' in first_element
+        assert 'line_index' in first_element
+        
+        # Should start from top of page
+        assert first_element['y'] == 800
+    
+    def test_find_nearby_text(self):
+        """Test finding text near field coordinates."""
+        extractor = ContextExtractor(self.mock_analyzer)
+        
+        # Create mock text elements
+        text_elements = [
+            {'text': 'First Name:', 'x': 100, 'y': 600, 'width': 60, 'height': 12},
+            {'text': 'Last Name:', 'x': 100, 'y': 580, 'width': 60, 'height': 12},
+            {'text': 'PERSONAL INFORMATION', 'x': 100, 'y': 700, 'width': 120, 'height': 12},
+            {'text': 'Far away text', 'x': 500, 'y': 200, 'width': 80, 'height': 12},
+        ]
+        
+        field_rect = [200.0, 600.0, 400.0, 625.0]
+        nearby_text = extractor._find_nearby_text(text_elements, field_rect)
+        
+        # Should find nearby text, sorted by relevance
+        assert len(nearby_text) > 0
+        assert 'First Name:' in nearby_text
+        assert 'Far away text' not in nearby_text  # Too far away
+    
+    def test_detect_field_label(self):
+        """Test field label detection."""
+        extractor = ContextExtractor(self.mock_analyzer)
+        
+        # Test with colon-terminated label
+        nearby_text = ['First Name:', 'Enter your name', 'Required field']
+        label = extractor._detect_field_label(nearby_text, [100, 100, 200, 120])
+        assert label == 'First Name'
+        
+        # Test with field indicator
+        nearby_text = ['Enter email address', 'Contact info', 'Optional']
+        label = extractor._detect_field_label(nearby_text, [100, 100, 200, 120])
+        assert 'email' in label.lower()
+        
+        # Test with empty nearby text
+        label = extractor._detect_field_label([], [100, 100, 200, 120])
+        assert label == ""
+    
+    def test_find_section_header(self):
+        """Test section header detection."""
+        extractor = ContextExtractor(self.mock_analyzer)
+        
+        page_text = """
+        PERSONAL INFORMATION SECTION
+        
+        First Name: [field]
+        Last Name: [field]
+        
+        Contact Information:
+        Email: [field]
+        """
+        
+        header = extractor._find_section_header(page_text, [100, 100, 200, 120])
+        assert 'PERSONAL INFORMATION' in header or 'Contact Information' in header
+    
+    def test_determine_visual_group(self):
+        """Test visual grouping determination."""
+        extractor = ContextExtractor(self.mock_analyzer)
+        
+        # Test different vertical positions
+        field_top = FormField("f1", "test", "text", 1, [100, 750, 200, 770], "", {})
+        field_middle = FormField("f2", "test", "text", 1, [100, 400, 200, 420], "", {})
+        field_bottom = FormField("f3", "test", "text", 1, [100, 50, 200, 70], "", {})
+        
+        assert extractor._determine_visual_group(field_top, []) == "header_section"
+        assert extractor._determine_visual_group(field_middle, []) == "middle_section"
+        assert extractor._determine_visual_group(field_bottom, []) == "footer_section"
+    
+    def test_extract_directional_text(self):
+        """Test directional text extraction."""
+        extractor = ContextExtractor(self.mock_analyzer)
+        
+        text_elements = [
+            {'text': 'Above text', 'x': 200, 'y': 650, 'width': 60, 'height': 12},
+            {'text': 'Below text', 'x': 200, 'y': 580, 'width': 60, 'height': 12},
+            {'text': 'Left text', 'x': 50, 'y': 600, 'width': 60, 'height': 12},
+            {'text': 'Right text', 'x': 450, 'y': 600, 'width': 60, 'height': 12},
+        ]
+        
+        field_rect = [200.0, 600.0, 400.0, 625.0]
+        
+        text_above = extractor._extract_directional_text(text_elements, field_rect, "above")
+        text_below = extractor._extract_directional_text(text_elements, field_rect, "below")
+        text_left = extractor._extract_directional_text(text_elements, field_rect, "left")
+        text_right = extractor._extract_directional_text(text_elements, field_rect, "right")
+        
+        assert text_above == "Above text"
+        assert text_below == "Below text"
+        assert text_left == "Left text"
+        assert text_right == "Right text"
+    
+    def test_calculate_context_confidence(self):
+        """Test context confidence calculation."""
+        extractor = ContextExtractor(self.mock_analyzer)
+        
+        # High confidence case
+        confidence = extractor._calculate_context_confidence(
+            label="First Name",
+            nearby_text=["First Name:", "Enter name", "Required"],
+            section_header="Personal Information",
+            text_above="Personal Information",
+            text_left="First Name:"
+        )
+        assert confidence > 0.8
+        
+        # Low confidence case
+        confidence = extractor._calculate_context_confidence(
+            label="",
+            nearby_text=[],
+            section_header="",
+            text_above="",
+            text_left=""
+        )
+        assert confidence <= 0.5
+    
+    def test_extract_field_context_complete(self):
+        """Test complete field context extraction."""
+        extractor = ContextExtractor(self.mock_analyzer)
+        
+        context = extractor.extract_field_context(self.sample_field)
+        
+        # Check all expected attributes are present
+        assert context.field_id == "field_001"
+        assert isinstance(context.nearby_text, list)
+        assert isinstance(context.section_header, str)
+        assert isinstance(context.label, str)
+        assert isinstance(context.confidence, float)
+        assert isinstance(context.visual_group, str)
+        assert isinstance(context.text_above, str)
+        assert isinstance(context.text_below, str)
+        assert isinstance(context.text_left, str)
+        assert isinstance(context.text_right, str)
+        assert isinstance(context.context_properties, dict)
+        
+        # Check context properties
+        assert context.context_properties["field_type"] == "text"
+        assert context.context_properties["field_name"] == "first_name"
+        assert context.context_properties["page_number"] == 1
+        assert context.context_properties["extraction_method"] == "proximity_analysis"
+    
+    def test_extract_field_context_error_handling(self):
+        """Test error handling in context extraction."""
+        # Create extractor with invalid analyzer that will cause an error
+        broken_analyzer = Mock(spec=PDFAnalyzer)
+        broken_analyzer.reader = None
+        
+        extractor = ContextExtractor(broken_analyzer)
+        
+        context = extractor.extract_field_context(self.sample_field)
+        
+        # Should return context with low confidence due to lack of page text
+        assert context.field_id == "field_001"
+        assert context.confidence <= 0.5  # Low confidence due to missing text
+        assert context.nearby_text == []  # No nearby text found
+        assert context.section_header == ""  # No section header found
+    
+    def test_extract_all_contexts(self):
+        """Test extracting contexts for multiple fields."""
+        extractor = ContextExtractor(self.mock_analyzer)
+        
+        fields = [
+            self.sample_field,
+            FormField("field_002", "last_name", "text", 1, [200, 575, 400, 600], "", {})
+        ]
+        
+        contexts = extractor.extract_all_contexts(fields)
+        
+        assert len(contexts) == 2
+        assert "field_001" in contexts
+        assert "field_002" in contexts
+        assert isinstance(contexts["field_001"], FieldContext)
+        assert isinstance(contexts["field_002"], FieldContext)

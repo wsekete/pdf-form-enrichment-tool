@@ -73,6 +73,16 @@ class FormField:
     def is_readonly(self) -> bool:
         """Check if field is read-only."""
         return self.properties.get("readonly", False)
+    
+    @property
+    def coordinates(self) -> Dict[str, float]:
+        """Get coordinates as a dictionary for compatibility."""
+        return {
+            'x': self.rect[0],
+            'y': self.rect[1],
+            'width': self.width,
+            'height': self.height
+        }
 
 
 class FieldExtractor:

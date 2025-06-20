@@ -2,6 +2,7 @@
 
 import os
 import re
+import csv
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Any
@@ -80,6 +81,13 @@ class ValidationReport:
             self.issues = []
         if not self.pair_details:
             self.pair_details = {}
+    
+    @property
+    def success_rate(self) -> float:
+        """Calculate validation success rate."""
+        if self.total_pairs == 0:
+            return 0.0
+        return self.valid_pairs / self.total_pairs
 
 
 class TrainingDataLoader:
@@ -139,6 +147,61 @@ class TrainingDataLoader:
         logger.info(f"Discovered {len(pairs)} training pairs")
         return pairs
     
+    def load_formfield_examples(self, examples_path: str = "./samples/FormField_examples.csv") -> List[CSVFieldMapping]:
+        """Load the comprehensive FormField examples for pattern learning."""
+        logger.info(f"Loading FormField examples from {examples_path}")
+        
+        if not Path(examples_path).exists():
+            logger.warning(f"FormField examples not found: {examples_path}")
+            return []
+        
+        mappings = []
+        with open(examples_path, 'r', encoding='utf-8') as f:
+            reader = csv.DictReader(f)
+            
+            for i, row in enumerate(reader):
+                try:
+                    # Extract BEM name from apiName column
+                    api_name = row.get('apiName', row.get('Api name', ''))
+                    label = row.get('label', row.get('Label', ''))
+                    field_type = row.get('type', row.get('Type', 'TextField'))
+                    
+                    # Skip empty or invalid entries
+                    if not api_name or not label:
+                        continue
+                    
+                    # Convert field type
+                    type_mapping = {
+                        'TextField': 'text',
+                        'Checkbox': 'checkbox', 
+                        'RadioButton': 'radio',
+                        'RadioGroup': 'radio'
+                    }
+                    normalized_type = type_mapping.get(field_type, 'text')
+                    
+                    mapping = CSVFieldMapping(
+                        id=i,
+                        label=label,
+                        description=row.get('description', ''),
+                        api_name=api_name,
+                        field_type=normalized_type,
+                        page=int(row.get('page', row.get('Page', 0))),
+                        x=float(row.get('x', row.get('X', 0))),
+                        y=float(row.get('y', row.get('Y', 0))),
+                        width=float(row.get('width', row.get('Width', 0))),
+                        height=float(row.get('height', row.get('Height', 0))),
+                        section_id=int(row['sectionId']) if row.get('sectionId') else None,
+                        parent_id=int(row['parentId']) if row.get('parentId') else None
+                    )
+                    mappings.append(mapping)
+                    
+                except (ValueError, KeyError) as e:
+                    logger.debug(f"Skipping FormField example row {i}: {str(e)}")
+                    continue
+        
+        logger.info(f"Loaded {len(mappings)} FormField examples")
+        return mappings
+
     def load_training_pair(self, pdf_path: str, csv_path: str) -> TrainingExample:
         """Load and validate a single training pair."""
         logger.info(f"Loading training pair: {Path(pdf_path).name}")
@@ -150,23 +213,15 @@ class TrainingDataLoader:
             
             # Initialize with PDF file
             analyzer = PDFAnalyzer(pdf_path)
-            extractor = FieldExtractor()
-            context_extractor = ContextExtractor()
-            
-            # Analyze PDF structure
-            pdf_metadata = analyzer.analyze_pdf_structure()
-            
-            # Initialize extractor with PDF
-            extractor.load_pdf(pdf_path)
+            extractor = FieldExtractor(analyzer)
+            context_extractor = ContextExtractor(analyzer)
             
             # Extract form fields
             pdf_fields = extractor.extract_form_fields()
             
             # Extract field contexts
-            contexts = []
-            for field in pdf_fields:
-                context = context_extractor.extract_field_context(field)
-                contexts.append(context)
+            contexts = context_extractor.extract_all_contexts(pdf_fields)
+            context_list = list(contexts.values())  # Convert dict to list
             
             # Load CSV mappings
             csv_mappings = self._load_csv_mappings(csv_path)
@@ -181,7 +236,7 @@ class TrainingDataLoader:
                 pdf_fields=pdf_fields,
                 csv_mappings=csv_mappings,
                 field_correlations=correlations,
-                context_data=contexts,
+                context_data=context_list,
                 confidence=confidence
             )
             
@@ -209,8 +264,8 @@ class TrainingDataLoader:
                         id=int(row.get('ID', i)),
                         label=row.get('Label', ''),
                         description=row.get('Description', ''),
-                        api_name=row.get('Api name', ''),
-                        field_type=row.get('Type', ''),
+                        api_name=row.get('Api name', ''),  # This is the correct BEM name
+                        field_type=row.get('Type', 'TextField'),
                         page=int(row.get('Page', 1)),
                         x=float(row.get('X', 0)),
                         y=float(row.get('Y', 0)),

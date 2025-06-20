@@ -17,7 +17,8 @@ The project follows a modular architecture with these core components:
   - **utils/**: Utility modules for logging, error handling, and common functions
 - **tests/**: Comprehensive test suite with unit, integration, and performance tests
 - **config/**: Configuration files (default.yaml contains app settings)
-- **training_data/**: BEM naming patterns and training data for AI model
+- **training/**: Training data integration and pattern analysis for BEM name learning
+- **samples/**: Training data directory containing CSV/PDF pairs and FormField_examples.csv
 - **docs/**: Complete documentation including PRDs and API references
 
 ## Common Development Commands
@@ -113,8 +114,15 @@ The MCP server enables Claude Desktop integration:
 - ✅ **Task 1.3**: Form Field Discovery with radio button hierarchy breakthrough (COMPLETED)
 - ✅ **Task 1.4**: Field Context Extraction with AI-ready output (COMPLETED)
 
+**Phase 2: BEM Name Generation & PDF Modification** - 🔄 **IN PROGRESS**
+- ✅ **Task 2.1**: Training Data Integration & Pattern Analysis (COMPLETED)
+- ⏳ **Task 2.2**: Context-Aware BEM Name Generator (PENDING)
+- ⏳ **Task 2.3**: PDF Field Modification Engine (PENDING)  
+- ⏳ **Task 2.4**: Database-Ready Output Generation (PENDING)
+
 **Major Breakthroughs**: 
 1. Complete form field extraction including both radio group containers AND individual radio button widgets, achieving 100% accuracy on real-world forms (98/98 fields detected in test form FAFF-0009AO.13).
 2. Intelligent context extraction with 75%+ confidence on complex forms, providing rich semantic data for AI naming.
+3. **NEW**: Training data integration system processes 8,264 field mappings from 14 PDF/CSV pairs + FormField_examples.csv, extracting 1,028 naming patterns for intelligent BEM generation.
 
-**Phase 1 Complete**: All core PDF processing, field extraction, and context analysis are production-ready. Ready for Phase 2: AI integration for BEM naming.
+**Task 2.1 Complete**: Comprehensive training data integration and pattern analysis system built. Successfully processes all training pairs with 450.9% increase in data volume through FormField_examples.csv integration. Pattern database ready for intelligent BEM name generation.

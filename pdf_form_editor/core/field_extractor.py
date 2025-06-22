@@ -15,6 +15,7 @@ from pypdf import PdfReader
 from pypdf.generic import DictionaryObject, ArrayObject, IndirectObject
 
 from .pdf_analyzer import PDFAnalyzer
+from .constants import FieldExtractionConstants, PDFConstants
 from ..utils.errors import PDFProcessingError
 from ..utils.logging import get_logger
 
@@ -48,7 +49,8 @@ class FormField:
         # Ensure rect has 4 coordinates
         if len(self.rect) != 4:
             logger.warning(f"Field {self.id}: Invalid rect coordinates, using defaults")
-            self.rect = [0.0, 0.0, 0.0, 0.0]
+            self.rect = [FieldExtractionConstants.DEFAULT_FIELD_WIDTH, FieldExtractionConstants.DEFAULT_FIELD_HEIGHT, 
+                        FieldExtractionConstants.DEFAULT_FIELD_WIDTH, FieldExtractionConstants.DEFAULT_FIELD_HEIGHT]
         
         # Ensure properties is a dict
         if not isinstance(self.properties, dict):
@@ -137,14 +139,18 @@ class FieldExtractor:
                 self._field_cache = fields
                 return fields
             
-            # Get AcroForm dictionary
+            # Get AcroForm dictionary with safe access
             catalog = self.reader.trailer.get("/Root")
-            if not catalog or "/AcroForm" not in catalog:
-                logger.warning("No AcroForm found in PDF catalog")
+            if not catalog:
+                logger.warning("No document catalog found")
                 self._field_cache = fields
                 return fields
             
-            acro_form = catalog["/AcroForm"]
+            acro_form = catalog.get("/AcroForm")
+            if not acro_form:
+                logger.warning("No AcroForm found in catalog")
+                self._field_cache = fields
+                return fields
             
             # Extract fields from AcroForm
             if "/Fields" in acro_form:
@@ -152,7 +158,7 @@ class FieldExtractor:
                 logger.info(f"Found {len(field_array)} form fields in PDF")
                 
                 # Large form memory management
-                if len(field_array) > 1000:
+                if len(field_array) > FieldExtractionConstants.LARGE_FORM_THRESHOLD:
                     logger.warning(f"Large form detected ({len(field_array)} fields), consider chunked processing")
                 
                 field_counter = 0
@@ -161,7 +167,7 @@ class FieldExtractor:
                         field_obj = field_ref.get_object() if isinstance(field_ref, IndirectObject) else field_ref
                         if isinstance(field_obj, DictionaryObject):
                             # Parse field and any child fields (for radio button groups)
-                            parsed_fields = self._parse_field_hierarchy(field_obj, field_counter)
+                            parsed_fields = self._parse_field_hierarchy(field_obj, field_counter, set())
                             for field in parsed_fields:
                                 if field:
                                     fields.append(field)
@@ -179,17 +185,31 @@ class FieldExtractor:
             logger.error(f"Error extracting form fields: {str(e)}")
             raise PDFProcessingError(f"Failed to extract form fields: {str(e)}")
     
-    def _parse_field_hierarchy(self, field_obj: DictionaryObject, index: int) -> List[FormField]:
+    def _parse_field_hierarchy(self, field_obj: DictionaryObject, index: int, 
+                              visited_refs: Optional[set] = None) -> List[FormField]:
         """
         Parse field hierarchy including child fields for radio button groups.
         
         Args:
             field_obj: PDF field dictionary object
             index: Field index for ID generation
+            visited_refs: Set of visited references to prevent circular references
             
         Returns:
             List of FormField instances (may be empty)
         """
+        if visited_refs is None:
+            visited_refs = set()
+        
+        # Get object reference to detect cycles
+        obj_ref = getattr(field_obj, 'indirect_reference', None)
+        if obj_ref and obj_ref in visited_refs:
+            logger.warning(f"Circular reference detected in field hierarchy: {obj_ref}")
+            return []
+        
+        if obj_ref:
+            visited_refs.add(obj_ref)
+        
         fields = []
         
         try:
@@ -206,8 +226,8 @@ class FieldExtractor:
                         try:
                             kid_obj = kid_ref.get_object() if isinstance(kid_ref, IndirectObject) else kid_ref
                             if isinstance(kid_obj, DictionaryObject):
-                                # Use a proper integer index for child fields
-                                child_id_index = index * 100 + child_index  # Ensure unique integer IDs
+                                # Use string-based ID to prevent integer overflow
+                                child_id_index = f"{index}_{child_index}"
                                 child_field = self._parse_field(kid_obj, child_id_index)
                                 if child_field:
                                     # Set parent relationship
@@ -249,13 +269,13 @@ class FieldExtractor:
         
         return fields
     
-    def _parse_field(self, field_obj: DictionaryObject, index: int) -> Optional[FormField]:
+    def _parse_field(self, field_obj: DictionaryObject, index: Union[int, str]) -> Optional[FormField]:
         """
         Parse individual field object into FormField instance.
         
         Args:
             field_obj: PDF field dictionary object
-            index: Field index for ID generation
+            index: Field index for ID generation (int or string)
             
         Returns:
             FormField instance or None if parsing fails
@@ -271,8 +291,11 @@ class FieldExtractor:
             # Extract field properties and flags
             properties = self._extract_field_properties(field_obj)
             
-            # Create field ID
-            field_id = f"field_{index:03d}"
+            # Create field ID - handle both int and string indices
+            if isinstance(index, int):
+                field_id = f"field_{index:06d}"
+            else:
+                field_id = f"field_{index}"
             
             return FormField(
                 id=field_id,
@@ -288,18 +311,22 @@ class FieldExtractor:
             logger.error(f"Error parsing field {index}: {str(e)}")
             return None
     
-    def _get_field_name(self, field_obj: DictionaryObject, index: int) -> str:
+    def _get_field_name(self, field_obj: DictionaryObject, index: Union[int, str]) -> str:
         """Extract field name from field object."""
         try:
             # Try partial name first (/T), then full name (/TU)
-            if "/T" in field_obj:
-                name = str(field_obj["/T"])
+            name_value = field_obj.get("/T")
+            if name_value is not None:
+                name = str(name_value) if name_value else ""
                 return name if name else f"Field_{index}"
-            elif "/TU" in field_obj:
-                name = str(field_obj["/TU"])
+            
+            # Try full name as fallback
+            name_value = field_obj.get("/TU")
+            if name_value is not None:
+                name = str(name_value) if name_value else ""
                 return name if name else f"Field_{index}"
-            else:
-                return f"Field_{index}"
+            
+            return f"Field_{index}"
         except Exception:
             return f"Field_{index}"
     
@@ -384,14 +411,21 @@ class FieldExtractor:
         """Extract field rectangle coordinates."""
         try:
             rect = field_obj.get("/Rect")
-            if rect and len(rect) >= 4:
-                return [float(x) for x in rect[:4]]
-            else:
-                logger.warning("Invalid or missing field rectangle")
-                return [0.0, 0.0, 0.0, 0.0]
+            if not rect or len(rect) < 4:
+                logger.warning("Invalid field rectangle - insufficient coordinates")
+                return [FieldExtractionConstants.DEFAULT_FIELD_WIDTH, FieldExtractionConstants.DEFAULT_FIELD_HEIGHT,
+                       FieldExtractionConstants.DEFAULT_FIELD_WIDTH, FieldExtractionConstants.DEFAULT_FIELD_HEIGHT]
+            
+            try:
+                return [float(rect[i]) for i in range(4)]
+            except (ValueError, TypeError) as e:
+                logger.warning(f"Invalid coordinate values in rect: {e}")
+                return [FieldExtractionConstants.DEFAULT_FIELD_WIDTH, FieldExtractionConstants.DEFAULT_FIELD_HEIGHT,
+                       FieldExtractionConstants.DEFAULT_FIELD_WIDTH, FieldExtractionConstants.DEFAULT_FIELD_HEIGHT]
         except Exception as e:
             logger.warning(f"Error extracting field rectangle: {str(e)}")
-            return [0.0, 0.0, 0.0, 0.0]
+            return [FieldExtractionConstants.DEFAULT_FIELD_WIDTH, FieldExtractionConstants.DEFAULT_FIELD_HEIGHT,
+                   FieldExtractionConstants.DEFAULT_FIELD_WIDTH, FieldExtractionConstants.DEFAULT_FIELD_HEIGHT]
     
     def _find_field_page(self, field_obj: DictionaryObject) -> int:
         """
@@ -443,14 +477,14 @@ class FieldExtractor:
             ff = field_obj.get("/Ff", 0)
             if isinstance(ff, int):
                 properties.update({
-                    "readonly": bool(ff & 1),           # Bit 1
-                    "required": bool(ff & 2),           # Bit 2
-                    "no_export": bool(ff & 4),          # Bit 3
-                    "multiline": bool(ff & 4096),       # Bit 13 (text fields)
-                    "password": bool(ff & 8192),        # Bit 14 (text fields)
-                    "radio": bool(ff & 32768),          # Bit 16 (button fields)
-                    "pushbutton": bool(ff & 16384),     # Bit 15 (button fields)
-                    "combo": bool(ff & 131072),         # Bit 18 (choice fields)
+                    "readonly": bool(ff & PDFConstants.READONLY_FLAG),
+                    "required": bool(ff & PDFConstants.REQUIRED_FLAG),
+                    "no_export": bool(ff & PDFConstants.NO_EXPORT_FLAG),
+                    "multiline": bool(ff & PDFConstants.MULTILINE_FLAG),
+                    "password": bool(ff & PDFConstants.PASSWORD_FLAG),
+                    "radio": bool(ff & PDFConstants.RADIO_FLAG),
+                    "pushbutton": bool(ff & PDFConstants.PUSHBUTTON_FLAG),
+                    "combo": bool(ff & PDFConstants.COMBO_FLAG),
                 })
             
             # Extract other properties
@@ -628,6 +662,11 @@ class FieldExtractor:
             fields = self.extract_form_fields()
         
         return [field for field in fields if field.page == page_number]
+    
+    def clear_cache(self):
+        """Clear cached field data to free memory."""
+        self._field_cache = None
+        logger.debug("Field cache cleared")
     
     def validate_field_structure(self, fields: Optional[List[FormField]] = None) -> Dict[str, Any]:
         """
@@ -820,6 +859,12 @@ class ContextExtractor:
             
         return contexts
     
+    def clear_cache(self):
+        """Clear cached text data to free memory."""
+        self._page_texts.clear()
+        self._text_elements.clear()
+        logger.debug("Context extractor cache cleared")
+    
     def _get_page_text(self, page_num: int) -> str:
         """
         Get text content for a specific page (with caching).
@@ -863,7 +908,7 @@ class ContextExtractor:
                 
                 # Split text into lines and create approximate positions
                 lines = page_text.split('\n')
-                y_position = 800  # Start from top of page (approximate)
+                y_position = PDFConstants.DEFAULT_TOP_MARGIN  # Start from top of page (approximate)
                 
                 for i, line in enumerate(lines):
                     line = line.strip()
@@ -871,13 +916,13 @@ class ContextExtractor:
                         # Approximate positioning (real implementation would need content stream parsing)
                         elements.append({
                             'text': line,
-                            'x': 100,  # Approximate left margin
+                            'x': PDFConstants.DEFAULT_LEFT_MARGIN,  # Approximate left margin
                             'y': y_position,
-                            'width': len(line) * 6,  # Approximate width
-                            'height': 12,  # Approximate line height
+                            'width': len(line) * PDFConstants.APPROXIMATE_CHAR_WIDTH,  # Approximate width
+                            'height': PDFConstants.APPROXIMATE_LINE_HEIGHT,  # Approximate line height
                             'line_index': i
                         })
-                        y_position -= 15  # Move down for next line
+                        y_position -= PDFConstants.LINE_SPACING  # Move down for next line
                 
                 self._text_elements[page_num] = elements
                 
@@ -903,7 +948,7 @@ class ContextExtractor:
         
         nearby_text = []
         field_x, field_y = field_rect[0], field_rect[1]
-        proximity_threshold = 100  # Pixels
+        proximity_threshold = FieldExtractionConstants.PROXIMITY_THRESHOLD
         
         for element in text_elements:
             text = element.get('text', '').strip()
@@ -925,7 +970,7 @@ class ContextExtractor:
             len(x)  # Shorter first
         ))
         
-        return nearby_text[:10]  # Limit to most relevant
+        return nearby_text[:FieldExtractionConstants.MAX_NEARBY_TEXT]  # Limit to most relevant
     
     def _detect_field_label(self, nearby_text: List[str], field_rect: List[float]) -> str:
         """
@@ -1010,13 +1055,13 @@ class ContextExtractor:
         # Simple grouping based on vertical position
         field_y = field.rect[1]
         
-        if field_y > 700:
+        if field_y > PDFConstants.HEADER_SECTION_THRESHOLD:
             return "header_section"
-        elif field_y > 500:
+        elif field_y > PDFConstants.UPPER_SECTION_THRESHOLD:
             return "upper_section"
-        elif field_y > 300:
+        elif field_y > PDFConstants.MIDDLE_SECTION_THRESHOLD:
             return "middle_section"
-        elif field_y > 100:
+        elif field_y > PDFConstants.LOWER_SECTION_THRESHOLD:
             return "lower_section"
         else:
             return "footer_section"
@@ -1082,27 +1127,27 @@ class ContextExtractor:
         Returns:
             Confidence score between 0.0 and 1.0
         """
-        confidence = 0.3  # Base confidence
+        confidence = FieldExtractionConstants.CONTEXT_CONFIDENCE_BASE  # Base confidence
         
         # Boost confidence for clear label
         if label:
             if ':' in label or any(word in label.lower() for word in ['name', 'address', 'email', 'phone']):
-                confidence += 0.3
+                confidence += FieldExtractionConstants.LABEL_CONFIDENCE_BOOST
             else:
                 confidence += 0.1
         
         # Boost for substantial nearby text
         if len(nearby_text) >= 3:
-            confidence += 0.2
+            confidence += FieldExtractionConstants.NEARBY_TEXT_CONFIDENCE_BOOST
         elif len(nearby_text) >= 1:
             confidence += 0.1
         
         # Boost for section header
         if section_header:
-            confidence += 0.1
+            confidence += FieldExtractionConstants.SECTION_HEADER_CONFIDENCE_BOOST
         
         # Boost for directional text
         if text_above or text_left:
-            confidence += 0.1
+            confidence += FieldExtractionConstants.DIRECTIONAL_TEXT_CONFIDENCE_BOOST
         
         return min(confidence, 1.0)

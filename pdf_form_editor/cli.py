@@ -5,6 +5,7 @@ Command Line Interface for PDF Form Enrichment Tool
 
 import os
 import sys
+import json
 from pathlib import Path
 
 import click
@@ -402,7 +403,7 @@ def generate_names(ctx: click.Context, pdf_path: str, training_data: str, output
             bem_results = []
             generated_names = []
             
-            preservation_stats = {"preserved": 0, "improved": 0, "restructured": 0}
+            preservation_stats = {"preserve": 0, "improve": 0, "restructure": 0}
             
             with click.progressbar(fields, label="Analyzing names") as progress_fields:
                 for field in progress_fields:
@@ -424,8 +425,8 @@ def generate_names(ctx: click.Context, pdf_path: str, training_data: str, output
                         generated_names.append(result.bem_name)
                         preservation_stats[analysis.action.value] += 1
             
-            click.echo(f"📊 Preservation Analysis: {preservation_stats['preserved']} preserved, "
-                      f"{preservation_stats['improved']} improved, {preservation_stats['restructured']} restructured")
+            click.echo(f"📊 Preservation Analysis: {preservation_stats['preserve']} preserved, "
+                      f"{preservation_stats['improve']} improved, {preservation_stats['restructure']} restructured")
         
         else:
             # Use regular generation mode

@@ -9,6 +9,8 @@ from typing import Dict, List, Optional, Tuple, Any
 from datetime import datetime
 
 from ..core.field_extractor import FormField, FieldContext
+from ..core.constants import TrainingConstants, ErrorConstants
+from .csv_schema import CSVFieldMapping
 import logging
 from ..utils.logging import setup_logging
 
@@ -27,28 +29,6 @@ class TrainingPair:
     def __post_init__(self):
         if self.issues is None:
             self.issues = []
-
-
-@dataclass
-class CSVFieldMapping:
-    """Field mapping from CSV training data."""
-    id: int
-    label: str
-    description: str
-    api_name: str  # Target BEM name
-    field_type: str
-    page: int
-    x: float
-    y: float
-    width: float
-    height: float
-    section_id: Optional[int] = None
-    parent_id: Optional[int] = None
-    additional_properties: Dict[str, Any] = None
-    
-    def __post_init__(self):
-        if self.additional_properties is None:
-            self.additional_properties = {}
 
 
 @dataclass
@@ -93,11 +73,16 @@ class ValidationReport:
 class TrainingDataLoader:
     """Load and validate training data from CSV/PDF pairs."""
     
-    def __init__(self, data_directory: str = "./samples"):
-        """Initialize with path to CSV/PDF training pairs."""
+    def __init__(self, data_directory: str = "./samples", pdf_analyzer=None, field_extractor=None, context_extractor=None):
+        """Initialize with path to CSV/PDF training pairs and optional dependencies."""
         self.data_directory = Path(data_directory)
         self.pdf_pattern = re.compile(r'(.+)_parsed\.pdf$')
         self.csv_pattern = re.compile(r'(.+)_parsed_correct_mapping\.csv$')
+        
+        # Optional dependency injection to avoid circular imports
+        self._pdf_analyzer_class = pdf_analyzer
+        self._field_extractor_class = field_extractor  
+        self._context_extractor_class = context_extractor
         
         if not self.data_directory.exists():
             raise FileNotFoundError(f"Training data directory not found: {data_directory}")
@@ -195,8 +180,11 @@ class TrainingDataLoader:
                     )
                     mappings.append(mapping)
                     
-                except (ValueError, KeyError) as e:
-                    logger.debug(f"Skipping FormField example row {i}: {str(e)}")
+                except ValueError as e:
+                    logger.debug(f"Skipping FormField example row {i} - invalid data format: {str(e)}")
+                    continue
+                except KeyError as e:
+                    logger.debug(f"Skipping FormField example row {i} - missing required field {str(e)}")
                     continue
         
         logger.info(f"Loaded {len(mappings)} FormField examples")
@@ -207,9 +195,21 @@ class TrainingDataLoader:
         logger.info(f"Loading training pair: {Path(pdf_path).name}")
         
         try:
-            # Load PDF fields using Phase 1 extraction
-            from ..core.pdf_analyzer import PDFAnalyzer
-            from ..core.field_extractor import FieldExtractor, ContextExtractor
+            # Load PDF fields using Phase 1 extraction with dependency injection
+            if self._pdf_analyzer_class:
+                PDFAnalyzer = self._pdf_analyzer_class
+            else:
+                from ..core.pdf_analyzer import PDFAnalyzer
+                
+            if self._field_extractor_class:
+                FieldExtractor = self._field_extractor_class
+            else:
+                from ..core.field_extractor import FieldExtractor
+                
+            if self._context_extractor_class:
+                ContextExtractor = self._context_extractor_class
+            else:
+                from ..core.field_extractor import ContextExtractor
             
             # Initialize with PDF file
             analyzer = PDFAnalyzer(pdf_path)
@@ -245,8 +245,15 @@ class TrainingDataLoader:
             
             return example
             
+        except FileNotFoundError as e:
+            logger.error(f"Training pair file not found - {pdf_path}: {str(e)}")
+            raise
+        except PermissionError as e:
+            logger.error(f"Permission denied accessing training pair - {pdf_path}: {str(e)}")
+            raise
         except Exception as e:
             logger.error(f"Failed to load training pair {pdf_path}: {str(e)}")
+            # Could add fallback behavior here if needed
             raise
     
     def _load_csv_mappings(self, csv_path: str) -> List[CSVFieldMapping]:
@@ -280,8 +287,14 @@ class TrainingDataLoader:
                     )
                     mappings.append(mapping)
                     
-                except (ValueError, KeyError) as e:
-                    logger.warning(f"Skipping invalid CSV row {i} in {csv_path}: {str(e)}")
+                except ValueError as e:
+                    logger.warning(f"Skipping CSV row {i} in {csv_path} - invalid data format: {str(e)}")
+                    continue
+                except KeyError as e:
+                    logger.warning(f"Skipping CSV row {i} in {csv_path} - missing required field {str(e)}")
+                    continue
+                except Exception as e:
+                    logger.error(f"Unexpected error processing CSV row {i} in {csv_path}: {str(e)}")
                     continue
         
         logger.info(f"Loaded {len(mappings)} CSV field mappings from {csv_path}")
@@ -309,8 +322,8 @@ class TrainingDataLoader:
                     best_distance = distance
                     best_match = csv_mapping
             
-            # Accept match if distance is reasonable (within 50 points)
-            if best_match and best_distance < 50:
+            # Accept match if distance is reasonable (within threshold)
+            if best_match and best_distance < TrainingConstants.SPATIAL_CORRELATION_THRESHOLD:
                 correlations[pdf_field.id] = best_match.api_name
             else:
                 logger.warning(f"No close CSV match for PDF field {pdf_field.id} "
@@ -333,7 +346,7 @@ class TrainingDataLoader:
         count_similarity = min(len(pdf_fields), len(csv_mappings)) / max(len(pdf_fields), len(csv_mappings))
         
         # Combine factors
-        confidence = (correlation_ratio * 0.7) + (count_similarity * 0.3)
+        confidence = (correlation_ratio * TrainingConstants.CORRELATION_RATIO_WEIGHT) + (count_similarity * TrainingConstants.COUNT_SIMILARITY_WEIGHT)
         
         return min(confidence, 1.0)
     
@@ -365,7 +378,7 @@ class TrainingDataLoader:
                     pair_issues.extend(bem_issues)
                     
                     # Check correlation quality
-                    if example.confidence < 0.5:
+                    if example.confidence < ErrorConstants.MIN_CONFIDENCE_THRESHOLD:
                         pair_issues.append(f"Low field correlation confidence: {example.confidence:.2f}")
                     
                     if not pair_issues:
@@ -421,7 +434,7 @@ class TrainingDataLoader:
                 seen_names.add(api_name)
             
             # Check length
-            if len(api_name) > 50:
+            if len(api_name) > TrainingConstants.MAX_BEM_NAME_LENGTH:
                 issues.append(f"API name too long: {api_name}")
         
         return issues
